@@ -1,5 +1,9 @@
+
+# %%
 from youtube_transcript_api import YouTubeTranscriptApi
 import os
+import requests
+import time
 
 def extract_video_id(url):
     """Extract video ID from YouTube URL"""
@@ -44,11 +48,26 @@ def save_subtitle(subtitle_data, video_id):
             f.write(f"{entry.text}\n")
 
 def main():
+    # Download youtube.txt from the provided URL
+    url = "https://raw.githubusercontent.com/zinderud/HuginRisale/main/youtube.txt"
+    response = requests.get(url)
+    
+    # Check if the request was successful
+    if response.status_code == 200:
+        # Save the content to youtube.txt
+        with open("youtube.txt", "w") as f:
+            f.write(response.text)
+        print("youtube.txt downloaded successfully.")
+    else:
+        print(f"Failed to download youtube.txt. Status code: {response.status_code}")
+        return  # Exit if download fails
+    
     # Read YouTube URLs
     with open("youtube.txt", "r") as f:
         urls = f.readlines()
     
-    # Process each URL
+    # Process each URL with request count and waiting
+    request_count = 0
     for url in urls:
         url = url.strip()
         if url:
@@ -61,6 +80,11 @@ def main():
                 print(f"Saved subtitles for {video_id}")
             else:
                 print(f"No Turkish subtitles found for {video_id}")
+            
+            request_count += 1
+            if request_count % 50 == 0:
+                print("Waiting for 10 seconds...")
+                time.sleep(60)
 
 if __name__ == "__main__":
     main()
