@@ -8,7 +8,6 @@ from pydub import AudioSegment
 import json
 import re
 import yt_dlp
-import shutil
 
 # Uyarıları bastır
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -122,26 +121,32 @@ def transcribe_audio(filepath, language="tr"):
         result = transcriber(
             filepath,
             chunk_length_s=30,
-            generate_kwargs={"language": language}
+            generate_kwargs={"language": language, "return_timestamps": True}  # Zaman damgalarını etkinleştir
         )
-        print(f"Transkripsiyon tamamlandı: {len(result['text'])} karakter")
+        print(f"Transkripsiyon tamamlandı: {len(result['text'])} karakter, {len(result.get('chunks', []))} parça")
         return result["text"], result.get("chunks", [])
     except Exception as e:
         print(f"Transkripsiyon hatası: {e}")
         return None, None
 
-def create_srt(chunks, filename):
+def create_srt(chunks, filename, full_text=None):
     """SRT dosyası oluşturma"""
     print(f"SRT dosyası oluşturuluyor: {filename}")
     srt_content = ""
-    for i, chunk in enumerate(chunks):
-        start = chunk["timestamp"][0]
-        end = chunk["timestamp"][1]
-        text = chunk["text"].strip()
-        
-        srt_content += f"{i+1}\n"
-        srt_content += f"{format_time(start)} --> {format_time(end)}\n"
-        srt_content += f"{text}\n\n"
+    
+    if not chunks and full_text:
+        # Chunks boşsa, tam metni tek bir blok olarak ekle
+        print("Uyarı: Chunks boş, tam metin kullanılıyor.")
+        srt_content = "1\n00:00:00,000 --> 00:00:30,000\n" + full_text.strip() + "\n\n"
+    else:
+        for i, chunk in enumerate(chunks):
+            start = chunk["timestamp"][0]
+            end = chunk["timestamp"][1]
+            text = chunk["text"].strip()
+            
+            srt_content += f"{i+1}\n"
+            srt_content += f"{format_time(start)} --> {format_time(end)}\n"
+            srt_content += f"{text}\n\n"
     
     with open(filename, "w", encoding="utf-8") as f:
         f.write(srt_content)
@@ -173,11 +178,15 @@ def update_database(local_dir, metadata):
     db_file = os.path.join(local_dir, "database.json")
     print(f"Veritabanı güncelleniyor: {db_file}")
     
+    db = {"videos": []}
     if os.path.exists(db_file):
-        with open(db_file, "r", encoding="utf-8") as f:
-            db = json.load(f)
-    else:
-        db = {"videos": []}
+        try:
+            with open(db_file, "r", encoding="utf-8") as f:
+                db = json.load(f)
+            print(f"Mevcut video sayısı: {len(db['videos'])}")
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"Veritabanı okuma hatası, sıfırdan başlatılıyor: {e}")
+            db = {"videos": []}
     
     existing_urls = {v["url"] for v in db["videos"]}
     if metadata["url"] not in existing_urls:
@@ -186,6 +195,9 @@ def update_database(local_dir, metadata):
         
         with open(db_file, "w", encoding="utf-8") as f:
             json.dump(db, f, ensure_ascii=False, indent=2)
+        print(f"Yeni video eklendi, toplam video sayısı: {len(db['videos'])}")
+    else:
+        print(f"Video zaten mevcut: {metadata['url']}")
     
     return db
 
@@ -212,20 +224,19 @@ def process_video(url, local_repo):
         txt_path = os.path.join(local_repo, "transcripts", f"{base_name}.txt")
         metadata_path = os.path.join(local_repo, "metadata", f"{base_name}.json")
         
-        create_srt(chunks, srt_path)
+        create_srt(chunks, srt_path, full_text=transcript)  # Tam metni yedek olarak geç
         with open(txt_path, "w", encoding="utf-8") as f:
             print(f"Transkript kaydediliyor: {txt_path}")
             f.write(transcript)
         save_metadata(metadata, metadata_path)
         update_database(local_repo, metadata)
         
-        # HfApi ile dosyaları yükle
         api = HfApi(token=HF_TOKEN)
         for file_path in [audio_path, srt_path, txt_path, metadata_path, os.path.join(local_repo, "database.json")]:
             if os.path.exists(file_path):
                 api.upload_file(
                     path_or_fileobj=file_path,
-                    path_in_repo=file_path[len(local_repo)+1:],  # 'risale-sohbet-turkish/' kısmını çıkar
+                    path_in_repo=file_path[len(local_repo)+1:],
                     repo_id=f"{HF_USERNAME}/{REPO_NAME}",
                     repo_type="dataset",
                     commit_message=f"Add: {metadata['title']}"
@@ -248,22 +259,17 @@ def main():
         print(f"Kimlik doğrulama başarısız: {e}")
         return
     
-    if os.path.exists(REPO_NAME):
-        shutil.rmtree(REPO_NAME)
-        print(f"Eski {REPO_NAME} dizini temizlendi.")
-    
     local_repo = setup_huggingface_repo()
     if local_repo is None:
         return
     
     urls = [
-        "https://www.youtube.com/watch?v=RP3eibpPSs8",
+       "https://www.youtube.com/watch?v=RP3eibpPSs8",
   "https://www.youtube.com/watch?v=X9caEnhBUXU",
   "https://www.youtube.com/watch?v=YSzDVdnYrs4",
   "https://www.youtube.com/watch?v=IcBlmlr6nuw",
   "https://www.youtube.com/watch?v=uIv6QDro4lM",
   "https://www.youtube.com/watch?v=M6mFPJwPVdM",
- 
     ]
     
     for url in urls:
