@@ -18,6 +18,10 @@ HF_TOKEN = ""
 HF_USERNAME = "zinderud"
 REPO_NAME = "risale-sohbet-turkish"
 
+# Cihaz belirleme
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Kullanılan cihaz: {device}")
+
 # Tokenizer ve KeyBERT modeli
 tokenizer = AutoTokenizer.from_pretrained("dbmdz/bert-base-turkish-cased")
 kw_model = KeyBERT(model="dbmdz/bert-base-turkish-cased")
@@ -47,7 +51,6 @@ def download_youtube_audio(url, output_dir):
             filepath = os.path.join(output_dir, f"{clean_filename(info['title'])}.mp3")
             if os.path.exists(filename) and filename != filepath:
                 os.rename(filename, filepath)
-            print(f"Dosya indirildi: {filepath}")
             return filepath, {
                 "title": info['title'],
                 "author": info.get('uploader', 'Bilinmiyor'),
@@ -67,23 +70,25 @@ def clean_filename(text):
     return text[:50]
 
 def transcribe_audio(filepath, language="tr"):
-    """Whisper ile transkripsiyon"""
+    """Whisper ile transkripsiyon (GPU optimize)"""
     try:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Transkripsiyon için dosya bulunamadı: {filepath}")
         
-        print(f"Transkripsiyon yapılıyor: {filepath}")
         transcriber = pipeline(
             "automatic-speech-recognition",
             model="openai/whisper-large-v2",
-            device=0 if torch.cuda.is_available() else -1
+            device=device,
         )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         result = transcriber(
             filepath,
             chunk_length_s=30,
-            generate_kwargs={"language": language, "task": "transcribe", "return_timestamps": True}
+            generate_kwargs={"language": language, "task": "transcribe", "return_timestamps": True},
+            batch_size=8
         )
-        print(f"Transkripsiyon tamamlandı: {len(result['text'])} karakter, {len(result.get('chunks', []))} parça")
         return result["text"], result.get("chunks", [])
     except Exception as e:
         print(f"Transkripsiyon hatası: {e}")
@@ -91,42 +96,32 @@ def transcribe_audio(filepath, language="tr"):
 
 def tokenize_text(transcript):
     """BERT tokenizer ile tokenizasyon"""
-    tokens = tokenizer.tokenize(transcript)
-    print(f"Tokenize edildi: {len(tokens)} token")
-    return tokens
+    return tokenizer.tokenize(transcript)
 
 def generate_keywords(transcript, num_keywords=5):
     """Anahtar kelime çıkarma (KeyBERT + yedek frekans analizi)"""
     try:
-        # KeyBERT ile anahtar kelime çıkarma
         keywords = kw_model.extract_keywords(
             transcript,
-            keyphrase_ngram_range=(1, 2),  # 1 ve 2 kelimelik ifadeler
-            stop_words=None,  # Durdurma kelimelerini kaldır
+            keyphrase_ngram_range=(1, 2),
+            stop_words=None,
             top_n=num_keywords
         )
         keyword_list = [kw[0] for kw in keywords]
-        if not keyword_list:  # Eğer KeyBERT başarısız olursa
+        if not keyword_list:
             raise ValueError("KeyBERT anahtar kelime çıkaramadı")
-        print(f"KeyBERT ile anahtar kelimeler: {keyword_list}")
         return keyword_list
     except Exception as e:
-        print(f"KeyBERT hatası: {e}, frekans analizi kullanılıyor")
-        # Yedek yöntem: Frekans analizi
         words = re.findall(r'\w+', transcript.lower())
         stop_words = {'bir', 've', 'bu', 'ile', 'da', 'de', 'mi', 'mu', 'ki', 'ne', 'için'}
         filtered_words = [word for word in words if word not in stop_words and len(word) > 2]
         word_counts = Counter(filtered_words)
-        keywords = [word for word, _ in word_counts.most_common(num_keywords)]
-        print(f"Frekans analizi ile anahtar kelimeler: {keywords}")
-        return keywords
+        return [word for word, _ in word_counts.most_common(num_keywords)]
 
 def create_srt(chunks, filename, full_text=None):
     """SRT dosyası oluşturma"""
-    print(f"SRT dosyası oluşturuluyor: {filename}")
     srt_content = ""
     if not chunks and full_text:
-        print("Uyarı: Chunks boş, tam metin kullanılıyor.")
         srt_content = "1\n00:00:00,000 --> 00:00:30,000\n" + full_text.strip() + "\n\n"
     else:
         for i, chunk in enumerate(chunks):
@@ -149,7 +144,6 @@ def format_time(seconds):
 
 def save_metadata(metadata, filename):
     """Metadata kaydetme"""
-    print(f"Metadata kaydediliyor: {filename}")
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
     return filename
@@ -160,11 +154,9 @@ def download_dataset_json(local_dir):
     db_file = os.path.join(local_dir, "dataset.json")
     try:
         api.hf_hub_download(repo_id=f"{HF_USERNAME}/{REPO_NAME}", filename="dataset.json", local_dir=local_dir, repo_type="dataset")
-        print(f"dataset.json repodan indirildi: {db_file}")
         with open(db_file, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"dataset.json indirme hatası, boş yapı başlatılıyor: {e}")
         return []
 
 def update_dataset_json(local_dir, title, transcript, audio_path, metadata):
@@ -187,7 +179,6 @@ def update_dataset_json(local_dir, title, transcript, audio_path, metadata):
     existing_urls = {entry["metadata"]["url"] for entry in dataset}
     if metadata["url"] not in existing_urls:
         dataset.append(new_entry)
-        print(f"Yeni video eklendi: {title}, toplam video sayısı: {len(dataset)}")
     else:
         print(f"Video zaten mevcut: {metadata['url']}")
     
@@ -204,10 +195,6 @@ def process_video(url, local_repo):
             return False
         
         audio_path = os.path.abspath(audio_path)
-        print(f"İndirilen dosya yolu (mutlak): {audio_path}")
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"İndirilen dosya bulunamadı: {audio_path}")
-        
         transcript, chunks = transcribe_audio(audio_path)
         if not transcript:
             return False
@@ -219,7 +206,6 @@ def process_video(url, local_repo):
         
         create_srt(chunks, srt_path, full_text=transcript)
         with open(txt_path, "w", encoding="utf-8") as f:
-            print(f"Transkript kaydediliyor: {txt_path}")
             f.write(transcript)
         save_metadata(metadata, metadata_path)
         update_dataset_json(local_repo, metadata["title"], transcript, audio_path, metadata)
@@ -234,7 +220,6 @@ def process_video(url, local_repo):
                     repo_type="dataset",
                     commit_message=f"Add: {metadata['title']}"
                 )
-                print(f"Dosya yüklendi: {file_path}")
         
         print("Başarıyla tamamlandı!")
         return True
@@ -257,7 +242,8 @@ def main():
         return
     
     urls = [
-      "https://www.youtube.com/shorts/wLSK0-UaYFY"
+        "https://www.youtube.com/watch?v=s4ujNtaKKEc",
+        "https://www.youtube.com/watch?v=XFRkvFk58jc",
     ]
     
     for url in urls:
